@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Temp Mail</title>
+<style>
+:root{--bg:#f2f4f8;--card:#fff;--ink:#14213d;--mut:#5b6785;--acc:#2447f9;--line:#d9deea}
+@media (prefers-color-scheme:dark){:root{--bg:#0f1424;--card:#171e35;--ink:#e8ecf8;--mut:#98a3c4;--acc:#7c93ff;--line:#2a3354}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;line-height:1.5}
+main{max-width:640px;margin:0 auto;padding:20px 16px 48px}
+h1{font-size:1.5rem;margin:8px 0 4px}
+p.sub{margin:0 0 20px;color:var(--mut)}
+.box{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px;margin-bottom:16px}
+.addr{font-size:1.1rem;font-weight:700;word-break:break-all;margin:0 0 12px}
+button{font:inherit;border:0;border-radius:8px;padding:10px 14px;cursor:pointer;background:var(--acc);color:#fff;font-weight:600}
+button.alt{background:transparent;color:var(--ink);border:1px solid var(--line)}
+button:focus-visible{outline:3px solid var(--acc);outline-offset:2px}
+.row{display:flex;gap:8px;flex-wrap:wrap}
+.msg{padding:12px 0;border-top:1px solid var(--line);cursor:pointer}
+.msg:first-child{border-top:0}
+.msg b{display:block}
+.msg small{color:var(--mut)}
+.empty,.status{color:var(--mut)}
+.body{white-space:pre-wrap;word-break:break-word;margin-top:12px}
+select{font:inherit;width:100%;padding:10px;border-radius:8px;border:1px solid var(--line);background:var(--card);color:var(--ink)}
+h2{font-size:1.05rem;margin:0 0 10px}
+</style>
+</head>
+<body>
+<main>
+  <h1>Temp Mail</h1>
+  <p class="sub">Une adresse email jetable, avec boîte de réception intégrée.</p>
+
+  <section class="box">
+    <p class="addr" id="addr">Création en cours…</p>
+    <div class="row">
+      <button id="copy">Copier l’adresse</button>
+      <button class="alt" id="new">Nouvelle adresse</button>
+      <button class="alt" id="refresh">Actualiser</button>
+    </div>
+    <p class="status" id="status"></p>
+  </section>
+
+  <section class="box" id="saved-box" hidden>
+    <h2>Mes adresses</h2>
+    <select id="saved"></select>
+  </section>
+
+  <section class="box">
+    <h2>Boîte de réception</h2>
+    <div id="inbox"><p class="empty">Aucun message pour l’instant. La page vérifie toutes les 10 secondes.</p></div>
+  </section>
+
+  <section class="box" id="reader" hidden>
+    <h2 id="r-subject"></h2>
+    <small class="status" id="r-from"></small>
+    <div class="body" id="r-body"></div>
+  </section>
+</main>
+
+<script>
+const API = "https://api.mail.tm";
+const $ = id => document.getElementById(id);
+let accounts = [];   // {address, password, token}
+let current = null;
+let timer = null;
+
+function load(){ try{ accounts = JSON.parse(localStorage.getItem("tm_accounts")||"[]"); }catch(e){ accounts=[]; } }
+function save(){ try{ localStorage.setItem("tm_accounts", JSON.stringify(accounts)); }catch(e){} }
+function say(t){ $("status").textContent = t||""; }
+const rnd = n => Array.from(crypto.getRandomValues(new Uint8Array(n)), b => "abcdefghijklmnopqrstuvwxyz0123456789"[b%36]).join("");
+
+async function api(path, opts={}, token){
+  const headers = Object.assign({"Content-Type":"application/json"}, opts.headers||{});
+  if(token) headers.Authorization = "Bearer "+token;
+  const r = await fetch(API+path, Object.assign({}, opts, {headers}));
+  if(!r.ok) throw new Error("HTTP "+r.status);
+  return r.status===204 ? null : r.json();
+}
+
+async function createAccount(){
+  say("Création de l’adresse…");
+  try{
+    const d = await api("/domains");
+    const domain = d["hydra:member"][0].domain;
+    const address = "u"+rnd(9)+"@"+domain;
+    const password = rnd(16);
+    await api("/accounts",{method:"POST",body:JSON.stringify({address,password})});
+    const t = await api("/token",{method:"POST",body:JSON.stringify({address,password})});
+    const acc = {address,password,token:t.token};
+    accounts.unshift(acc); save();
+    select(acc); say("");
+  }catch(e){ say("Échec de la création : "+e.message+" (si ça dit Failed to fetch, ouvre le fichier dans Chrome et vérifie ta connexion).");$("addr").textContent="Aucune adresse"; }
+}
+
+function renderSaved(){
+  $("saved-box").hidden = accounts.length < 2;
+  $("saved").innerHTML = accounts.map(a=>`<option value="${a.address}" ${current&&a.address===current.address?"selected":""}>${a.address}</option>`).join("");
+}
+
+function select(acc){
+  current = acc;
+  $("addr").textContent = acc.address;
+  $("reader").hidden = true;
+  renderSaved(); refresh();
+  clearInterval(timer); timer = setInterval(refresh, 10000);
+}
+
+async function refresh(){
+  if(!current) return;
+  try{
+    let list;
+    try{ list = await api("/messages",{},current.token); }
+    catch(e){
+      const t = await api("/token",{method:"POST",body:JSON.stringify({address:current.address,password:current.password})});
+      current.token = t.token; save();
+      list = await api("/messages",{},current.token);
+    }
+    const msgs = list["hydra:member"];
+    $("inbox").innerHTML = msgs.length ? "" : '<p class="empty">Aucun message pour l’instant. La page vérifie toutes les 10 secondes.</p>';
+    msgs.forEach(m=>{
+      const el = document.createElement("div"); el.className="msg"; el.tabIndex=0;
+      const b = document.createElement("b"); b.textContent = m.subject || "(sans objet)";
+      const s = document.createElement("small"); s.textContent = (m.from.name||m.from.address)+" · "+new Date(m.createdAt).toLocaleString("fr-FR");
+      el.append(b,s);
+      const open = ()=>openMsg(m.id);
+      el.onclick = open; el.onkeydown = e=>{ if(e.key==="Enter") open(); };
+      $("inbox").append(el);
+    });
+  }catch(e){ say("Actualisation impossible : "+e.message); }
+}
+
+async function openMsg(id){
+  try{
+    const m = await api("/messages/"+id,{},current.token);
+    $("r-subject").textContent = m.subject || "(sans objet)";
+    $("r-from").textContent = "De : "+(m.from.address||"");
+    $("r-body").textContent = m.text || "(message sans texte brut)";
+    $("reader").hidden = false;
+    $("reader").scrollIntoView({behavior:"smooth"});
+  }catch(e){ say("Impossible d’ouvrir ce message."); }
+}
+
+$("copy").onclick = async ()=>{
+  try{ await navigator.clipboard.writeText(current.address); say("Adresse copiée."); }
+  catch(e){ say("Copiez l’adresse manuellement."); }
+};
+$("new").onclick = createAccount;
+$("refresh").onclick = refresh;
+$("saved").onchange = e => select(accounts.find(a=>a.address===e.target.value));
+
+load();
+accounts.length ? select(accounts[0]) : createAccount();
+</script>
+</body>
+</html>
